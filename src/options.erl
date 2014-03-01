@@ -43,7 +43,10 @@
 -export([init/1
          ,start_link/0
          ,start_link/1
-         ,terminate/2]).
+         ,terminate/2
+         ,code_change/3
+         ,handle_info/2
+        ]).
 % Debugging
 -export([get_all/0]).
 
@@ -115,8 +118,8 @@ rehash_(ConfigName) ->
                 gb_trees:empty()
         end
     catch
-        L:E ->
-            ?DEBL({err,1},"Options file could not be read! Options only taken from environment file (~s ~w ~w)",[lists:flatten(ConfigName),L,E])
+        _L:_E ->
+            ?DEBL({err,1},"Options file could not be read! Options only taken from environment file (~s ~w ~w)",[lists:flatten(ConfigName),_L,_E])
     end,
     Configs.
 
@@ -162,7 +165,7 @@ parse_line(Line) ->
     end.
 
 
-replace([],B,C) -> [];
+replace([],_B,_C) -> [];
 replace([A|Str],B,C) when A == B ->
      [C|replace(Str,B,C)];
 replace([A|Str],B,C) -> [A|replace(Str,B,C)].
@@ -224,13 +227,13 @@ handle_call(get_config,_From,State={N,_}) ->
 handle_call(get,_From,State) ->
     {reply,State,State};
 
-handle_call({get,Y,X},_From,State=none) ->
+handle_call({get,Y,X},_From,_State=none) ->
     {reply,application:get_env(Y,X),none};
 
-handle_call({mget,Y,X},_From,State=none) ->
+handle_call({mget,Y,X},_From,_State=none) ->
     {reply,application:get_env(Y,X),none};
 
-handle_call({get,Y,X},_From,State={N,Names}) ->
+handle_call({get,Y,X},_From,State={_N,Names}) ->
     ?DEBL({options,9},"Searching for ~w",[X]),
     Value=case gb_trees:lookup(X,Names) of
         {value,{string,V}} -> 
@@ -245,7 +248,7 @@ handle_call({get,Y,X},_From,State={N,Names}) ->
     {reply,Value,State};
 
 
-handle_call({mget,Y,X},_From,State={N,Names}) ->
+handle_call({mget,Y,X},_From,State={_N,Names}) ->
     ?DEBL({options,9},"Searching for ~w",[X]),
     Value=case gb_trees:lookup(X,Names) of
         {value,V} -> 
@@ -270,3 +273,8 @@ handle_cast(rehash,{N,_}) ->
 terminate(_,_) ->
     ok.
     
+code_change(_OldVsn, State, _Extra) ->
+        {ok, State}.
+
+handle_info(_Info, State) ->
+        {noreply, State}.
