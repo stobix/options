@@ -100,8 +100,7 @@ fix_home(A) -> A.
 
 
 rehash_(ConfigName) ->
-    Configs = 
-      try 
+    try 
         case file:open(ConfigName,[read,raw]) of
             {ok,ConfigFile} ->
                 % Read options from config file
@@ -119,9 +118,9 @@ rehash_(ConfigName) ->
         end
     catch
         _L:_E ->
-            ?DEBL({err,1},"Options file could not be read! Options only taken from environment file (~s ~w ~w)",[lists:flatten(ConfigName),_L,_E])
-    end,
-    Configs.
+            ?DEBL({err,1},"Options file could not be read! Options only taken from environment file (~s ~w ~w)",[lists:flatten(ConfigName),_L,_E]),
+            gb_trees:empty()
+    end.
 
 make_tree(A) -> make_tree(A,gb_trees:empty()).
 
@@ -156,7 +155,10 @@ parse_line(Line) ->
                     ?DEBL(5,"Tokens: ~p",[Tails]),
                     WaggingTails = lists:map(fun fix_home/1,Tails),
                     FrozenTails = list_to_tuple(WaggingTails),
-                    {HeadAtom,FrozenTails}
+                    {HeadAtom,FrozenTails};
+                _BogusLine ->
+                    []
+
             end;
         [Head|Tail] ->
             A={list_to_atom(replace(Head,$ ,$_)),fix_home(string:strip(string:join(Tail,":")))},
@@ -278,3 +280,4 @@ code_change(_OldVsn, State, _Extra) ->
 
 handle_info(_Info, State) ->
         {noreply, State}.
+
