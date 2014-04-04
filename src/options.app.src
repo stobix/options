@@ -1,6 +1,6 @@
 {application, options,
-    [{description, "A utility for handling options taken from a config file, the environment or the -config erl option."},
-        {vsn,"0.0.1"},
+    [{description, "A utility for handling (module specific or general) options taken from config files, the environment or the -config_file erl argument."},
+        {vsn,"0.0.2"},
         {modules,[options,options_sup]},
         {registered,[options]},
         {applications,[kernel,stdlib]},

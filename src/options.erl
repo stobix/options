@@ -33,6 +33,19 @@
 -behaviour(gen_server).
 -behaviour(application).
 
+-type tree_thing()::{Key::term(),Val::term(),tree_thing(),tree_thing()}|nil.
+-type gb_tree()::{non_neg_integer(),tree_thing()}.
+
+-record(state,{
+        config_files=[]::string(),
+        config_options={0,nil}::gb_tree(),
+        set_options={0,nil}::gb_tree(),
+        module_syms=[]::[{SubModule::module(),AppModule::module()}]
+        }).
+        
+
+
+
 -include_lib("newdebug/include/debug.hrl").
 % application
 -export([
@@ -48,16 +61,29 @@
          ,handle_info/2
         ]).
 % Debugging
--export([get_all/0]).
+-export([
+    get_all/0
+    ,parse_line/2
+        ]).
 
 % Official        
 -export([get/2
         ,mget/2
         ,rehash/0
-        ,set_config/1
-        ,has_config/0
-        ,get_config/0
+        %,set_config/1
+        %,has_config/0
+        %,get_config/0
         ]).
+% TODO
+ -export([
+%       set_configs/1,
+%       list_configs/1,
+%       append_config/1,
+%       prepend_config/1,
+%       remove_config/1,
+       set/3
+    ]).
+
 % TODO: More than one config file...
 -export([handle_call/3,handle_cast/2]).
 
@@ -73,25 +99,22 @@ stop(_State) ->
 
 start_link() ->
     case init:get_argument(config_file) of
-        {ok,[[File]]} ->
+        {ok,[Files]} ->
             ?DEB1(2,"No config file specified, using -config_file"),
-            gen_server:start_link({local,?MODULE},?MODULE,File,[]);
+            gen_server:start_link({local,?MODULE},?MODULE,Files,[]);
         error ->
             ?DEB1(2,"Neither -config_file nor config file specified, starting without config file."),
-            gen_server:start_link({local,?MODULE},?MODULE,none,[])
+            gen_server:start_link({local,?MODULE},?MODULE,[],[])
     end.
 
 
-start_link(ConfigName) -> 
-  gen_server:start_link({local,?MODULE},?MODULE,ConfigName,[]).
+start_link(ConfigNames) -> 
+  gen_server:start_link({local,?MODULE},?MODULE,ConfigNames,[]).
 
-init(none) ->
-    {ok,none};
-
-init(ConfigName) ->
-    CN=fix_home(ConfigName),
-    Configs=rehash_(CN),
-    {ok,{CN,Configs}}.
+init(ConfigNames) ->
+    CN=lists:map(fun fix_home/1,ConfigNames),
+    Options=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,gb_trees:empty(),CN),
+    {ok,#state{config_files=CN,config_options=Options}}.
 
 fix_home([$~,$/|Name]) ->
     [os:getenv("HOME"),"/",Name];
@@ -99,7 +122,7 @@ fix_home([$~,$/|Name]) ->
 fix_home(A) -> A.
 
 
-rehash_(ConfigName) ->
+rehash_(ConfigName,TreeAcc) ->
     try 
         case file:open(ConfigName,[read,raw]) of
             {ok,ConfigFile} ->
@@ -107,9 +130,9 @@ rehash_(ConfigName) ->
                 Options=readfile(ConfigFile),
                 file:close(ConfigFile),
                 ?DEBL({options,9},"Options: ~n ~p",[Options]),
-                ParsedOpts=lists:map(fun(X)->parse_line(X) end,Options),
+                {ParsedOpts,_}=lists:mapfoldr(fun(X,Module)-> parse_line(X,Module) end,[],Options),
                 ?DEBL({options,9},"Parsed: ~n ~p",[ParsedOpts]),
-                ParsedTree=make_tree(ParsedOpts),
+                ParsedTree=make_tree(ParsedOpts,TreeAcc),
                 ParsedTree;
 
             Error ->
@@ -122,48 +145,80 @@ rehash_(ConfigName) ->
             gb_trees:empty()
     end.
 
-make_tree(A) -> make_tree(A,gb_trees:empty()).
-
 make_tree([],Acc) -> Acc;
 make_tree([[]|As],Acc) -> make_tree(As,Acc); % Comment or empty line.
-make_tree([{AKey,AVal}|As],Acc) ->
-    case gb_trees:lookup(AKey,Acc) of
-        {value,{string,AVal0}} -> make_tree(As,gb_trees:enter(AKey,{list,[AVal,AVal0]},Acc));
-        {value,{list,AList}} -> make_tree(As,gb_trees:enter(AKey,{list,[AVal|AList]},Acc));
-        none -> make_tree(As,gb_trees:insert(AKey,{string,AVal},Acc))
+make_tree([{Mod,AKey,AVal}|As],Acc) ->
+    case gb_trees:lookup(Mod,Acc) of
+        {value,Tree} ->
+            case gb_trees:lookup(AKey,Tree) of
+                {value,{string,AVal0}} -> 
+                    make_tree(As,
+                              gb_trees:enter(Mod,
+                                             gb_trees:enter(AKey,{list,[AVal,AVal0]},Tree),
+                                             Acc)
+                             );
+                {value,{list,AList}} -> 
+                    make_tree(As,
+                              gb_trees:enter(Mod,
+                                             gb_trees:enter(AKey,{list,[AVal|AList]},Tree),
+                                             Acc)
+                             );
+                none -> 
+                    make_tree(As,
+                              gb_trees:enter(Mod,
+                                             gb_trees:insert(AKey,{string,AVal},Tree),
+                                             Acc)
+                             )
+            end;
+        none ->
+            NewTree=gb_trees:insert(AKey,{string,AVal},gb_trees:empty()),
+            make_tree(As,gb_trees:insert(Mod,NewTree,Acc))
     end.
 
-parse_line([]) -> [];
+parse_line([],Mod) -> {[],Mod};
 % empty lines
-parse_line("\n") -> [];
+parse_line("\n",Mod) -> {[],Mod};
 % commented lines
-parse_line([$%|_]) -> [];
+parse_line([$%|_],Mod) -> {[],Mod};
 % bash commented lines
-parse_line([$#|_]) -> [];
-parse_line(Line) ->
+parse_line([$#|_],Mod) -> {[],Mod};
+parse_line(Line,Mod) ->
     StrippedLine=hd(string:tokens(Line,"\n")),
     ?DEBL({options,1},"Parsing \"~s\"",[StrippedLine]),
-    case string:tokens(StrippedLine,":") of
-        [NoColon] ->
-            ?DEBL(5,"Looking for ; in \"~s\"",[NoColon]),
-            case string:tokens(NoColon,";") of
-                [Head|Tail] ->
-                    RealTail=string:join(Tail,";"),
-                    ?DEBL(5,"Split: ~p ~p",[Head,RealTail]),
-                    HeadAtom=list_to_atom(replace(Head,$ ,$_)),
-                    Tails = string:tokens(RealTail," "),
-                    ?DEBL(5,"Tokens: ~p",[Tails]),
-                    WaggingTails = lists:map(fun fix_home/1,Tails),
-                    FrozenTails = list_to_tuple(WaggingTails),
-                    {HeadAtom,FrozenTails};
-                _BogusLine ->
-                    []
+    First=hd(StrippedLine),
+    {Last,Elddim}=lists:split(1,lists:reverse(tl(StrippedLine))),
+    Middle=lists:reverse(Elddim),
+    case {First,Middle,Last} of
+        {$[,NewMod,$]} ->
+            ?DEBL(3,"parsing app/module header",[]),
+            {[],NewMod};
+        % TODO
+        %{${,$}} ->
+            %?DEBL(3,"parsing app/module header",[]),
+            %[];
+        _ ->
+            case string:tokens(StrippedLine,":") of
+                [NoColon] ->
+                    ?DEBL(5,"Looking for ; in \"~s\"",[NoColon]),
+                    case string:tokens(NoColon,";") of
+                        [Head|Tail] ->
+                            RealTail=string:join(Tail,";"),
+                            ?DEBL(5,"Split: ~p ~p",[Head,RealTail]),
+                            HeadAtom=list_to_atom(replace(Head,$ ,$_)),
+                            Tails = string:tokens(RealTail," "),
+                            ?DEBL(5,"Tokens: ~p",[Tails]),
+                            WaggingTails = lists:map(fun fix_home/1,Tails),
+                            FrozenTails = list_to_tuple(WaggingTails),
+                            {{Mod,HeadAtom,FrozenTails},Mod};
+                        _BogusLine ->
+                            {[],Mod}
 
-            end;
-        [Head|Tail] ->
-            A={list_to_atom(replace(Head,$ ,$_)),fix_home(string:strip(string:join(Tail,":")))},
-            ?DEBL({options,3},"Returning ~p",[A]),
-            A
+                    end;
+                [Head|Tail] ->
+                    A={Mod,list_to_atom(replace(Head,$ ,$_)),fix_home(string:strip(string:join(Tail,":")))},
+                    ?DEBL({options,3},"Returning ~p",[A]),
+                    {A,Mod}
+            end
     end.
 
 
@@ -176,14 +231,17 @@ replace([A|Str],B,C) -> [A|replace(Str,B,C)].
 rehash() ->
     gen_server:cast(?MODULE,rehash).
 
-set_config(File) ->
-    gen_server:cast(?MODULE,{set_config,File}).
+set(Mod,Key,Val) ->
+    gen_server:cast(?MODULE,{set,Mod,Key,Val}).
 
-has_config() ->
-    gen_server:call(?MODULE,has_config).
+%set_config(File) ->
+    %gen_server:cast(?MODULE,{set_config,File}).
 
-get_config() ->
-    gen_server:call(?MODULE,get_config).
+%has_config() ->
+    %gen_server:call(?MODULE,has_config).
+
+%get_config() ->
+    %gen_server:call(?MODULE,get_config).
 
 readfile(File) ->
     readfile(File,[]).
@@ -205,51 +263,73 @@ get_all() ->
 %   * undefined otherwise
 %  The values are fetched primarily from the config file specified when starting the options server
 %  using the app file of Y as a fallback.
-get(Y,X) ->
-    gen_server:call(?MODULE,{get,Y,X}).
+get(Mod,Key) ->
+    gen_server:call(?MODULE,{get,Mod,Key}).
 
 % Like mget, but without any filtering of return types.
 mget(Y,X) ->
     gen_server:call(?MODULE,{mget,Y,X}).
 
 
-handle_call(has_config,_From,none) ->
-    {reply,false,none};
-
-handle_call(has_config,_From,State) ->
-    {reply,true,State};
-
-
-handle_call(get_config,_From,none) ->
-    {reply,none,none};
-
-handle_call(get_config,_From,State={N,_}) ->
-    {reply,N,State};
+%handle_call(has_config,_From,none) ->
+%    {reply,false,none};
+%
+%handle_call(has_config,_From,State) ->
+%    {reply,true,State};
+%
+%
+%handle_call(get_config,_From,none) ->
+%    {reply,none,none};
+%
+%handle_call(get_config,_From,State={N,_}) ->
+%    {reply,N,State};
 
 handle_call(get,_From,State) ->
     {reply,State,State};
 
-handle_call({get,Y,X},_From,_State=none) ->
-    {reply,application:get_env(Y,X),none};
-
-handle_call({mget,Y,X},_From,_State=none) ->
-    {reply,application:get_env(Y,X),none};
-
-handle_call({get,Y,X},_From,State={_N,Names}) ->
-    ?DEBL({options,9},"Searching for ~w",[X]),
-    Value=case gb_trees:lookup(X,Names) of
-        {value,{string,V}} -> 
-            ?DEBL({options,9},"Found name: ~w",[V]),
-            {ok,V};
-        {value,{list,V}} ->
-            ?DEBL({options,9},"Found list: ~w, returning first entry",[V]),
-            {ok,hd(V)};
-        _ -> ?DEBL({options,9},"No name in ~w, returning application:get_env(~w,~w)",[N,Y,X]),
-            application:get_env(Y,X)
+handle_call({get,Mod,Key},_From,State=#state{config_options=Options,set_options=SetOptions}) ->
+    ?DEBL({options,9},"Searching for ~w",[Key]),
+    GetSysOpt=fun() ->
+            case application:get_env(Mod,Key) of
+                undefined ->
+                    application:get_key(Mod,Key);
+                Ret ->
+                    Ret
+            end
+    end,
+    Value=case gb_trees:lookup(Mod,SetOptions) of
+        {value,SetTree} ->
+            case gb_trees:lookup(Key,SetTree) of
+                {value,{string,V}} -> 
+                    ?DEBL({options,9},"Found name: ~w",[V]),
+                    {ok,V};
+                {value,{list,V}} ->
+                    ?DEBL({options,9},"Found list: ~w, returning first entry",[V]),
+                    {ok,hd(V)};
+                none ->
+                    case gb_trees:lookup(Mod,Options) of
+                        {value,OptionsTree} ->
+                            case gb_trees:lookup(Key,OptionsTree) of
+                                {value,{string,V}} -> 
+                                    ?DEBL({options,9},"Found name: ~w",[V]),
+                                    {ok,V};
+                                {value,{list,V}} ->
+                                    ?DEBL({options,9},"Found list: ~w, returning first entry",[V]),
+                                    {ok,hd(V)};
+                                none -> 
+                                    GetSysOpt()
+                            end;
+                        none ->
+                            GetSysOpt()
+                    end
+            end;
+        none ->
+            GetSysOpt()
     end,
     {reply,Value,State};
 
 
+% XXX FIXME
 handle_call({mget,Y,X},_From,State={_N,Names}) ->
     ?DEBL({options,9},"Searching for ~w",[X]),
     Value=case gb_trees:lookup(X,Names) of
@@ -261,16 +341,24 @@ handle_call({mget,Y,X},_From,State={_N,Names}) ->
     end,
     {reply,Value,State}.
 
-handle_cast({set_config,File},_) ->
-    FixedFile=fix_home(File),
-    ?DEBL({options,3},"Replacing config file with file ~s",[FixedFile]),
-    {noreply,{FixedFile,rehash_(FixedFile)}};
+%handle_cast({set_config,File},State) ->
+    %FixedFile=fix_home(File),
+    %?DEBL({options,3},"Replacing config file with file ~s",[FixedFile]),
+    %{noreply,{FixedFile,rehash_(FixedFile)}};
 
-handle_cast(_,none) ->
-    {noreply,none};
+handle_cast({set,Mod,Key,Val},State=#state{set_options=OldSets}) ->
+    NewSets=case gb_trees:lookup(Mod,OldSets) of
+        {value,Tree} ->
+            gb_trees:enter(Mod,gb_trees:enter(Key,{string,Val},Tree),OldSets);
+        none ->
+            gb_trees:insert(Mod,gb_trees:insert(Key,{string,Val},gb_trees:empty()),OldSets)
+    end,
+    {noreply,State#state{set_options=NewSets}};
 
-handle_cast(rehash,{N,_}) ->
-    {noreply,{N,rehash_(N)}}.
+
+handle_cast(rehash,State=#state{config_files=Configs}) ->
+    Options=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,gb_trees:empty(),Configs),
+    {noreply,State#state{config_options=Options}}.
 
 terminate(_,_) ->
     ok.
