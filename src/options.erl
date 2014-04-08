@@ -62,12 +62,15 @@
         ]).
 % Debugging
 -export([
-    get_all/0
+    %XXX This is heavily unneccessary. Remove?
+    get_state/0
     ,parse_line/2
-        ]).
+    ]).
 
 % Official        
 -export([get/2
+        ,get_all/0
+        ,get_all/1
         ,mget/2
         ,rehash/0
         %,set_config/1
@@ -78,7 +81,8 @@
  -export([
 %       set_configs/1,
 %       list_configs/1,
-%       append_config/1,
+       append_config/1,
+       append_configs/1,
 %       prepend_config/1,
 %       remove_config/1,
        set/3
@@ -113,37 +117,63 @@ start_link(ConfigNames) ->
 
 init(ConfigNames) ->
     CN=lists:map(fun fix_home/1,ConfigNames),
-    Options=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,gb_trees:empty(),CN),
-    {ok,#state{config_files=CN,config_options=Options}}.
+    {Options,Pairings}=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,{gb_trees:empty(),[]},CN),
+    {ok,#state{config_files=CN,config_options=Options,module_syms=Pairings}}.
+
 
 fix_home([$~,$/|Name]) ->
     [os:getenv("HOME"),"/",Name];
 
 fix_home(A) -> A.
 
+append_config(Config) ->
+    gen_server:cast(?MODULE,{append_config,[Config]}).
 
-rehash_(ConfigName,TreeAcc) ->
-    try 
+append_configs(Configs) ->
+    gen_server:cast(?MODULE,{append_config,Configs}).
+
+rehash_(ConfigName,{TreeAcc,PairingsAcc}) ->
+    %try 
         case file:open(ConfigName,[read,raw]) of
             {ok,ConfigFile} ->
                 % Read options from config file
                 Options=readfile(ConfigFile),
                 file:close(ConfigFile),
                 ?DEBL({options,9},"Options: ~n ~p",[Options]),
-                {ParsedOpts,_}=lists:mapfoldr(fun(X,Module)-> parse_line(X,Module) end,[],Options),
+                {MaybeParsedOpts,_}=lists:mapfoldr(fun(X,Module)-> parse_line(X,Module) end,[],Options),
+                ParsedOpts=lists:flatten(MaybeParsedOpts),
                 ?DEBL({options,9},"Parsed: ~n ~p",[ParsedOpts]),
                 ParsedTree=make_tree(ParsedOpts,TreeAcc),
-                ParsedTree;
-
+                Modules=lst_ext:uniq(lists:map(fun vol_misc:fst/1,ParsedOpts)),
+                NewPairings= lists:foldr(
+                    fun(Module,Acc) ->
+                            case application:get_key(Module,modules) of
+                                undefined ->
+                                    Acc;
+                                {ok,ListOfChildren} ->
+                                    lists:foldr(
+                                        fun(Child,Bcc) ->
+                                                [{Child,Module}|Bcc]
+                                        end,
+                                        Acc,
+                                        ListOfChildren)
+                            end
+                    end,
+                    [],
+                    Modules),
+                ?DEBL(9,"Module pairings: ~p",[NewPairings]),
+                Pairings=lst_ext:uminsert(NewPairings,PairingsAcc),
+                {ParsedTree,Pairings};
             Error ->
                 ?DEBL({err,1},"Options file could not be read! Options only taken from environment file (~s ~w)",[lists:flatten(ConfigName),Error]),
-                gb_trees:empty()
+                {TreeAcc,PairingsAcc}
         end
-    catch
-        _L:_E ->
-            ?DEBL({err,1},"Options file could not be read! Options only taken from environment file (~s ~w ~w)",[lists:flatten(ConfigName),_L,_E]),
-            gb_trees:empty()
-    end.
+    %catch
+        %_L:_E ->
+            %?DEBL({err,1},"Error while parsing file! Options only taken from environment file (~s ~w ~w)",[lists:flatten(ConfigName),_L,_E]),
+            %{TreeAcc,PairingsAcc}
+    %end.
+    .
 
 make_tree([],Acc) -> Acc;
 make_tree([[]|As],Acc) -> make_tree(As,Acc); % Comment or empty line.
@@ -186,12 +216,12 @@ parse_line(Line,Mod) ->
     StrippedLine=hd(string:tokens(Line,"\n")),
     ?DEBL({options,1},"Parsing \"~s\"",[StrippedLine]),
     First=hd(StrippedLine),
-    {Last,Elddim}=lists:split(1,lists:reverse(tl(StrippedLine))),
+    {[Last],Elddim}=lists:split(1,lists:reverse(tl(StrippedLine))),
     Middle=lists:reverse(Elddim),
     case {First,Middle,Last} of
         {$[,NewMod,$]} ->
             ?DEBL(3,"parsing app/module header",[]),
-            {[],NewMod};
+            {[],list_to_atom(NewMod)};
         % TODO
         %{${,$}} ->
             %?DEBL(3,"parsing app/module header",[]),
@@ -215,10 +245,26 @@ parse_line(Line,Mod) ->
 
                     end;
                 [Head|Tail] ->
+                    ?DEBL(5,"got line with colon",[]),
                     A={Mod,list_to_atom(replace(Head,$ ,$_)),fix_home(string:strip(string:join(Tail,":")))},
                     ?DEBL({options,3},"Returning ~p",[A]),
                     {A,Mod}
             end
+    end.
+
+get_m_k_v(Mod,Key,ModTree) ->
+    case gb_trees:lookup(Mod,ModTree) of
+        {value,KeyTree} ->
+            case gb_trees:lookup(Key,KeyTree) of
+                {value,{string,V}} -> 
+                    {ok,V};
+                {value,{list,V}} ->
+                    {ok,hd(V)};
+                none -> 
+                    false 
+            end;
+        none ->
+            false
     end.
 
 
@@ -254,8 +300,69 @@ readfile(File,Acc) ->
     end.
 
 
+get_state() ->
+    gen_server:call(?MODULE,get_state).
+
 get_all() ->
-    gen_server:call(?MODULE,get).
+    {FileOptsTree,SetOptsTree}=gen_server:call(?MODULE,get_options),
+    GeneralOpts=tree_to_list([],FileOptsTree),
+    SetOpts=tree_to_list([],SetOptsTree),
+    MergedOpts=lst_ext:keyumerge(1,lists:keysort(1,SetOpts),lists:keysort(1,GeneralOpts)),
+    lists:map(fun get_first/1,MergedOpts).
+
+%TODO: Bindings: check if the module is bound to an app name. If it is, app settings supercede general settings. Module settings supercede both general settings and app settings.
+% ☐ is_bound(Mod) -> false|App
+% ☐  set makes module bindings
+% ☐  rehash also makes module bindings
+% 
+
+get_all(Module) ->
+    {FileOptsTree,SetOptsTree}=gen_server:call(?MODULE,get_options),
+    GeneralOpts=tree_to_list([],FileOptsTree),
+    SetOpts=tree_to_list([],SetOptsTree),
+    ModuleGeneralOpts=tree_to_list(Module,FileOptsTree),
+    ModuleSetOpts=tree_to_list(Module,SetOptsTree),
+    Generals=lst_ext:keyumerge(1,lists:keysort(1,SetOpts),lists:keysort(1,GeneralOpts)),
+    Specifics=lst_ext:keyumerge(1,lists:keysort(1,ModuleSetOpts),lists:keysort(1,ModuleGeneralOpts)),
+    MergedOpts=lst_ext:keyumerge(1,Specifics,Generals),
+    lists:map(fun get_first/1,MergedOpts).
+
+get_first({K,{string,A}}) -> {K,A};
+get_first({K,{list,A}}) -> {K,hd(A)}.
+
+%
+%umerge_vals(A,B) ->
+%    umerge_vals(A,B,[]).
+%
+%umerge_vals([],[],Acc) ->
+%    Acc;
+%
+%umerge_vals(L1,[],Acc) ->
+%    L1++Acc;
+%
+%umerge_vals([],L2,Acc) ->
+%    L2++Acc;
+%
+%umerge_vals(LL1=[I1={A,_}|L1],LL2=[I2={B,_}|L2],Acc) ->
+%    if A == B ->
+%            umerge_vals(L1,L2,[I1|Acc]);
+%        A < B ->
+%            umerge_vals(L1,LL2,[I1|Acc]);
+%        A > B ->
+%            umerge_vals(LL1,L2,[I2|Acc])
+%    end.
+
+
+
+tree_to_list(OptsName,Tree) ->
+    case gb_trees:lookup(OptsName,Tree) of
+        {value,Opts} ->
+            gb_trees:to_list(Opts);
+        none ->
+            []
+    end.
+
+
 
 % Returns 
 %   * the first value of option X in application Y, if multiple such values exist
@@ -284,53 +391,63 @@ mget(Y,X) ->
 %handle_call(get_config,_From,State={N,_}) ->
 %    {reply,N,State};
 
-handle_call(get,_From,State) ->
+handle_call(get_state,_From,State) ->
     {reply,State,State};
 
-handle_call({get,Mod,Key},_From,State=#state{config_options=Options,set_options=SetOptions}) ->
+handle_call(get_options,_From,State) ->
+    {reply,{State#state.config_options,State#state.set_options},State};
+
+handle_call({get,Module,Key},_From,State=#state{config_options=Options,set_options=SetOptions,module_syms=Syms}) ->
     ?DEBL({options,9},"Searching for ~w",[Key]),
-    GetSysOpt=fun() ->
+    GetSysOpt=
+               fun
+        ([]) -> false;
+        (Mod) ->
             case application:get_env(Mod,Key) of
                 undefined ->
-                    application:get_key(Mod,Key);
+                    case application:get_key(Mod,Key) of
+                        undefined ->
+                            false;
+                        Ret ->
+                            Ret
+                    end;
                 Ret ->
                     Ret
             end
+
     end,
-    Value=case gb_trees:lookup(Mod,SetOptions) of
-        {value,SetTree} ->
-            case gb_trees:lookup(Key,SetTree) of
-                {value,{string,V}} -> 
-                    ?DEBL({options,9},"Found name: ~w",[V]),
-                    {ok,V};
-                {value,{list,V}} ->
-                    ?DEBL({options,9},"Found list: ~w, returning first entry",[V]),
-                    {ok,hd(V)};
-                none ->
-                    case gb_trees:lookup(Mod,Options) of
-                        {value,OptionsTree} ->
-                            case gb_trees:lookup(Key,OptionsTree) of
-                                {value,{string,V}} -> 
-                                    ?DEBL({options,9},"Found name: ~w",[V]),
-                                    {ok,V};
-                                {value,{list,V}} ->
-                                    ?DEBL({options,9},"Found list: ~w, returning first entry",[V]),
-                                    {ok,hd(V)};
-                                none -> 
-                                    GetSysOpt()
-                            end;
-                        none ->
-                            GetSysOpt()
-                    end
-            end;
-        none ->
-            GetSysOpt()
+    ModCandidates =case lists:keyfind(Module,1,Syms) of
+        {A,B} when A == B ->
+            [Module,[]];
+        {_Mod,ParentMod} ->
+            [Module,ParentMod,[]];
+        false  ->
+            [Module,[]]
+    end,
+    Value=case get_m_k_v(Module,Key,SetOptions) of
+        false ->
+            lists:foldl(
+                fun
+                    (ModName,false) ->
+                        case get_m_k_v(ModName,Key,Options) of
+                            false ->
+                                GetSysOpt(ModName);
+                            Val ->
+                                Val
+                        end;
+                    (_,Stuff) ->
+                        Stuff
+                end,
+                false,
+                ModCandidates);
+        Val ->
+            Val
     end,
     {reply,Value,State};
 
 
 % XXX FIXME
-handle_call({mget,Y,X},_From,State={_N,Names}) ->
+handle_call({mget,Y,X},_From,State={N,Names}) ->
     ?DEBL({options,9},"Searching for ~w",[X]),
     Value=case gb_trees:lookup(X,Names) of
         {value,V} -> 
@@ -344,7 +461,12 @@ handle_call({mget,Y,X},_From,State={_N,Names}) ->
 %handle_cast({set_config,File},State) ->
     %FixedFile=fix_home(File),
     %?DEBL({options,3},"Replacing config file with file ~s",[FixedFile]),
-    %{noreply,{FixedFile,rehash_(FixedFile)}};
+handle_cast({append_config,ConfigNames},State=#state{config_files=OldCN}) ->
+    NewCN=lists:map(fun fix_home/1,ConfigNames),
+    % Append new files, in order, to the end of the list, unless they already exist - in which case they will keep their place in the list (for now).
+    CN=lst_ext:ruminsert(NewCN,OldCN),
+    {Options,Pairings}=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,{gb_trees:empty(),[]},CN),
+    {noreply,#state{config_files=CN,config_options=Options,module_syms=Pairings}};
 
 handle_cast({set,Mod,Key,Val},State=#state{set_options=OldSets}) ->
     NewSets=case gb_trees:lookup(Mod,OldSets) of
@@ -357,8 +479,10 @@ handle_cast({set,Mod,Key,Val},State=#state{set_options=OldSets}) ->
 
 
 handle_cast(rehash,State=#state{config_files=Configs}) ->
-    Options=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,gb_trees:empty(),Configs),
-    {noreply,State#state{config_options=Options}}.
+    ?DEBL(6,"rehashing...",[]),
+    {Options,Pairings}=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,{gb_trees:empty(),[]},Configs),
+    ?DEBL(6,"...done",[]),
+    {noreply,State#state{config_options=Options,module_syms=Pairings}}.
 
 terminate(_,_) ->
     ok.
