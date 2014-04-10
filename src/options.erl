@@ -252,6 +252,19 @@ parse_line(Line,Mod) ->
             end
     end.
 
+mget_m_k_v(Mod,Key,ModTree) ->
+    case gb_trees:lookup(Mod,ModTree) of
+        {value,KeyTree} ->
+            case gb_trees:lookup(Key,KeyTree) of
+                {value,V} ->
+                    {ok,V};
+                none -> 
+                    false 
+            end;
+        none ->
+            false
+    end.
+
 get_m_k_v(Mod,Key,ModTree) ->
     case gb_trees:lookup(Mod,ModTree) of
         {value,KeyTree} ->
@@ -374,8 +387,8 @@ get(Mod,Key) ->
     gen_server:call(?MODULE,{get,Mod,Key}).
 
 % Like mget, but without any filtering of return types.
-mget(Y,X) ->
-    gen_server:call(?MODULE,{mget,Y,X}).
+mget(Mod,Key) ->
+    gen_server:call(?MODULE,{mget,Mod,Key}).
 
 
 %handle_call(has_config,_From,none) ->
@@ -443,30 +456,64 @@ handle_call({get,Module,Key},_From,State=#state{config_options=Options,set_optio
         Val ->
             Val
     end,
-    {reply,Value,State};
+    {reply,false_to_undef(Value),State};
 
 
 % XXX FIXME
-handle_call({mget,Y,X},_From,State={N,Names}) ->
-    ?DEBL({options,9},"Searching for ~w",[X]),
-    Value=case gb_trees:lookup(X,Names) of
-        {value,V} -> 
-            ?DEBL({options,9},"Found ~w",[V]),
-            V;
-        _ -> ?DEBL({options,9},"No name in ~w, returning application:get_env(~w,~w)",[N,Y,X]),
-            application:get_env(Y,X)
-    end,
-    {reply,Value,State}.
+handle_call({mget,Module,Key},_From,State=#state{config_options=Options,set_options=SetOptions,module_syms=Syms}) ->
+    ?DEBL({options,9},"Searching for ~w",[Key]),
+    GetSysOpt=
+               fun
+        ([]) -> false;
+        (Mod) ->
+            case application:get_env(Mod,Key) of
+                undefined ->
+                    case application:get_key(Mod,Key) of
+                        undefined ->
+                            false;
+                        Ret ->
+                            Ret
+                    end;
+                Ret ->
+                    Ret
+            end
 
-%handle_cast({set_config,File},State) ->
-    %FixedFile=fix_home(File),
-    %?DEBL({options,3},"Replacing config file with file ~s",[FixedFile]),
+    end,
+    ModCandidates =case lists:keyfind(Module,1,Syms) of
+        {A,B} when A == B ->
+            [Module,[]];
+        {_Mod,ParentMod} ->
+            [Module,ParentMod,[]];
+        false  ->
+            [Module,[]]
+    end,
+    Value=case mget_m_k_v(Module,Key,SetOptions) of
+        false ->
+            lists:foldl(
+                fun
+                    (ModName,false) ->
+                        case mget_m_k_v(ModName,Key,Options) of
+                            false ->
+                                GetSysOpt(ModName);
+                            Val ->
+                                Val
+                        end;
+                    (_,Stuff) ->
+                        Stuff
+                end,
+                false,
+                ModCandidates);
+        Val ->
+            Val
+    end,
+    {reply,false_to_undef(Value),State}.
+
 handle_cast({append_config,ConfigNames},State=#state{config_files=OldCN}) ->
     NewCN=lists:map(fun fix_home/1,ConfigNames),
     % Append new files, in order, to the end of the list, unless they already exist - in which case they will keep their place in the list (for now).
     CN=lst_ext:ruminsert(NewCN,OldCN),
     {Options,Pairings}=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,{gb_trees:empty(),[]},CN),
-    {noreply,#state{config_files=CN,config_options=Options,module_syms=Pairings}};
+    {noreply,State#state{config_files=CN,config_options=Options,module_syms=Pairings}};
 
 handle_cast({set,Mod,Key,Val},State=#state{set_options=OldSets}) ->
     NewSets=case gb_trees:lookup(Mod,OldSets) of
@@ -483,6 +530,9 @@ handle_cast(rehash,State=#state{config_files=Configs}) ->
     {Options,Pairings}=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,{gb_trees:empty(),[]},Configs),
     ?DEBL(6,"...done",[]),
     {noreply,State#state{config_options=Options,module_syms=Pairings}}.
+
+false_to_undef(false) -> undefined;
+false_to_undef(X) -> X.
 
 terminate(_,_) ->
     ok.
