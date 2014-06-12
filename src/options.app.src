@@ -3,7 +3,7 @@
         {vsn,"0.0.2"},
         {modules,[options,options_sup]},
         {registered,[options]},
-        {applications,[kernel,stdlib]},
+        {applications,[kernel,stdlib,newdebug]},
         {mod,{options,[]}},
         {env,[]}]}.
 
