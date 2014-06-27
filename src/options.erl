@@ -33,13 +33,11 @@
 -behaviour(gen_server).
 -behaviour(application).
 
--type tree_thing()::{Key::term(),Val::term(),tree_thing(),tree_thing()}|nil.
--type gb_tree()::{non_neg_integer(),tree_thing()}.
 
 -record(state,{
         config_files=[]::string(),
-        config_options={0,nil}::gb_tree(),
-        set_options={0,nil}::gb_tree(),
+        config_options=gb_trees:empty()::gb_trees:gb_tree(_,_),
+        set_options=gb_trees:empty()::gb_trees:gb_tree(_,_),
         module_syms=[]::[{SubModule::module(),AppModule::module()}]
         }).
         
@@ -252,6 +250,7 @@ parse_line(Line,Mod) ->
             end
     end.
 
+-spec mget_m_k_v(module(),any(),gb_trees:tree(_,_)) -> false | {ok,{string,any()}|{list,[any()]}}.
 mget_m_k_v(Mod,Key,ModTree) ->
     case gb_trees:lookup(Mod,ModTree) of
         {value,KeyTree} ->
@@ -265,6 +264,7 @@ mget_m_k_v(Mod,Key,ModTree) ->
             false
     end.
 
+-spec get_m_k_v(module(),any(),gb_trees:tree(_,_)) -> false | {ok,any()}.
 get_m_k_v(Mod,Key,ModTree) ->
     case gb_trees:lookup(Mod,ModTree) of
         {value,KeyTree} ->
