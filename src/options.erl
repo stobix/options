@@ -508,7 +508,7 @@ handle_call({get,Module,Key,Default},_From,State=#state{config_options=Options,s
         Val ->
             Val
     end,
-    ReturnValue = case Value of
+    {ok,ReturnValue} = case Value of
         false -> {ok,Default};
         X -> X
     end,
