@@ -67,6 +67,7 @@
 
 % Official        
 -export([get/2
+        ,get/3
         ,get_all/0
         ,get_all/1
         ,mget/2
@@ -386,6 +387,9 @@ tree_to_list(OptsName,Tree) ->
 get(Mod,Key) ->
     gen_server:call(?MODULE,{get,Mod,Key}).
 
+get(Mod,Key,Default) ->
+    gen_server:call(?MODULE,{get,Mod,Key,Default}).
+
 % Like mget, but without any filtering of return types.
 mget(Mod,Key) ->
     gen_server:call(?MODULE,{mget,Mod,Key}).
@@ -457,6 +461,58 @@ handle_call({get,Module,Key},_From,State=#state{config_options=Options,set_optio
             Val
     end,
     {reply,false_to_undef(Value),State};
+
+handle_call({get,Module,Key,Default},_From,State=#state{config_options=Options,set_options=SetOptions,module_syms=Syms}) ->
+    ?DEBL({options,9},"Searching for ~w",[Key]),
+    GetSysOpt=
+               fun
+        ([]) -> false;
+        (Mod) ->
+            case application:get_env(Mod,Key) of
+                undefined ->
+                    case application:get_key(Mod,Key) of
+                        undefined ->
+                            false;
+                        Ret ->
+                            Ret
+                    end;
+                Ret ->
+                    Ret
+            end
+
+    end,
+    ModCandidates =case lists:keyfind(Module,1,Syms) of
+        {A,B} when A == B ->
+            [Module,[]];
+        {_Mod,ParentMod} ->
+            [Module,ParentMod,[]];
+        false  ->
+            [Module,[]]
+    end,
+    Value=case get_m_k_v(Module,Key,SetOptions) of
+        false ->
+            lists:foldl(
+                fun
+                    (ModName,false) ->
+                        case get_m_k_v(ModName,Key,Options) of
+                            false ->
+                                GetSysOpt(ModName);
+                            Val ->
+                                Val
+                        end;
+                    (_,Stuff) ->
+                        Stuff
+                end,
+                false,
+                ModCandidates);
+        Val ->
+            Val
+    end,
+    ReturnValue = case Value of
+        false -> {ok,Default};
+        X -> X
+    end,
+    {reply,ReturnValue,State};
 
 
 % XXX FIXME
