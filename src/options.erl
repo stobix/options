@@ -390,7 +390,7 @@ get(Mod,Key) ->
 get(Mod,Key,Default) ->
     gen_server:call(?MODULE,{get,Mod,Key,Default}).
 
-% Like mget, but without any filtering of return types.
+% @spec (module(),term()) -> {ok,{string,string()}|{list,[string()]}|{env,any()}}|undefined
 mget(Mod,Key) ->
     gen_server:call(?MODULE,{mget,Mod,Key}).
 
