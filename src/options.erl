@@ -160,7 +160,8 @@ rehash_({ConfigName,Type},{TreeAcc,PairingsAcc}) ->
                   ({A,B,L})-> 
                     case Type of
                       list -> {A,B,lists:flatten(L)};
-                      binary -> {A,B,list_to_binary(lists:flatten(L))} 
+                      binary -> {A,B,list_to_binary(lists:flatten(L))};
+                      unicode -> {A,B,unicode:characters_to_binary(L)}
                     end
                 end,
                 ParsedOpts=lists:map(MakeType,ParsedOpts0),
