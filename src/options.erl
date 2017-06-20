@@ -30,9 +30,15 @@
 %%%      values in the config file have precedence over the values in application:get_env.
 
 -module(options).
+-compile({parse_transform,cut}).
 -behaviour(gen_server).
 -behaviour(application).
 
+
+%%% TODO: 
+%%% ☐ Document this module
+%%% ☐ Load in options from a file as binaries rather than strings
+%%%
 
 -record(state,{
         config_files=[]::string(),
@@ -82,6 +88,8 @@
 %       list_configs/1,
        append_config/1,
        append_configs/1,
+       append_config/2,
+       append_configs/2,
 %       prepend_config/1,
 %       remove_config/1,
        set/3
@@ -126,12 +134,18 @@ fix_home([$~,$/|Name]) ->
 fix_home(A) -> A.
 
 append_config(Config) ->
-    gen_server:cast(?MODULE,{append_config,[Config]}).
+    gen_server:cast(?MODULE,{append_config,[Config],list}).
 
 append_configs(Configs) ->
-    gen_server:cast(?MODULE,{append_config,Configs}).
+    gen_server:cast(?MODULE,{append_config,Configs,list}).
 
-rehash_(ConfigName,{TreeAcc,PairingsAcc}) ->
+append_config(Config,OptType) ->
+    gen_server:cast(?MODULE,{append_config,[Config],OptType}).
+
+append_configs(Configs,OptType) ->
+    gen_server:cast(?MODULE,{append_config,Configs,OptType}).
+
+rehash_({ConfigName,Type},{TreeAcc,PairingsAcc}) ->
     %try 
         case file:open(ConfigName,[read,raw]) of
             {ok,ConfigFile} ->
@@ -140,7 +154,16 @@ rehash_(ConfigName,{TreeAcc,PairingsAcc}) ->
                 file:close(ConfigFile),
                 ?DEBL({options,9},"Options: ~n ~p",[Options]),
                 {MaybeParsedOpts,_}=lists:mapfoldr(fun(X,Module)-> parse_line(X,Module) end,[],Options),
-                ParsedOpts=lists:flatten(MaybeParsedOpts),
+                ?DEBL({options,9},"MaybeParsed: ~n ~p",[MaybeParsedOpts]),
+                ParsedOpts0=lists:flatten(MaybeParsedOpts), %XXX Does this ever DO anything?
+                MakeType=fun
+                  ({A,B,L})-> 
+                    case Type of
+                      list -> {A,B,lists:flatten(L)};
+                      binary -> {A,B,list_to_binary(lists:flatten(L))} 
+                    end
+                end,
+                ParsedOpts=lists:map(MakeType,ParsedOpts0),
                 ?DEBL({options,9},"Parsed: ~n ~p",[ParsedOpts]),
                 ParsedTree=make_tree(ParsedOpts,TreeAcc),
                 Modules=lst_ext:uniq(lists:map(fun vol_misc:fst/1,ParsedOpts)),
@@ -246,7 +269,7 @@ parse_line(Line,Mod) ->
                 [Head|Tail] ->
                     ?DEBL(5,"got line with colon",[]),
                     A={Mod,list_to_atom(replace(Head,$ ,$_)),fix_home(string:strip(string:join(Tail,":")))},
-                    ?DEBL({options,3},"Returning ~p",[A]),
+                    ?DEBL({options,4},"parsed colon line as ~p",[A]),
                     {A,Mod}
             end
     end.
@@ -564,10 +587,11 @@ handle_call({mget,Module,Key},_From,State=#state{config_options=Options,set_opti
     end,
     {reply,false_to_undef(Value),State}.
 
-handle_cast({append_config,ConfigNames},State=#state{config_files=OldCN}) ->
-    NewCN=lists:map(fun fix_home/1,ConfigNames),
+handle_cast({append_config,ConfigNames,Type},State=#state{config_files=OldCN}) ->
+    NewCN0=lists:map(fix_home(_),ConfigNames),
+    NewCN=lists:map({_,Type},NewCN0),
     % Append new files, in order, to the end of the list, unless they already exist - in which case they will keep their place in the list (for now).
-    CN=lst_ext:ruminsert(NewCN,OldCN),
+    CN=lst_ext:ruminsert(NewCN,OldCN), % XXX This will break if a config name has multiple types!
     {Options,Pairings}=lists:foldr(fun(Config,Tree) -> rehash_(Config,Tree) end,{gb_trees:empty(),[]},CN),
     {noreply,State#state{config_files=CN,config_options=Options,module_syms=Pairings}};
 
